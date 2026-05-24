@@ -2,58 +2,51 @@
 // @name         DMM 图片下载器
 // @namespace    dmm-blob-png-zip-downloader
 // @author       gunfub
-// @version      1.0
-// @icon         https://raw.githubusercontent.com/gunfub/DLsite-Play-Image-Downloader/refs/heads/main/source/Dlsite-Play-Image-Downloader--Chrome/icons/icon48.png
-// @description  捕获 DMM Viewer 中的 blob 图片并打包下载为 ZIP
+// @version      1.4
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=book.dmm.com
+// @description  捕获 DMM 中的 Canvas 图片并打包下载为 ZIP
 // @match        *://book.dmm.com/streaming/*
+// @match        *://book.dmm.co.jp/streaming/*
+// @match        *://book.dmm.com/product/*
+// @match        *://book.dmm.co.jp/product/*
 // @grant        none
 // ==/UserScript==
 
 /****************************************
- * Cloudreve Blob PNG ZIP Downloader (UI Enhanced)
- *Draggable modern UI, capture visible blob images, zip download
-****************************************/
-
+ * DMM Canvas Image ZIP Downloader (UI Enhanced)
+ * Draggable modern UI, hook drawImage to capture canvas, zip download
+ ****************************************/
 
 (() => {
   'use strict';
 
-  console.log('[BlobZIP] script loaded');
+  console.log('[DMM-ZIP] script loaded');
 
   /********************
    * State
    ********************/
   let capturing = false;
   let pageIndex = 1;
-  const captured = new Map();
+  const captured = [];
+  let preCapture = null;
 
   /********************
    * Utils
    ********************/
   const pad3 = n => String(n).padStart(3, '0');
 
-  function isVisible(el) {
-    const r = el.getBoundingClientRect();
-    const vw = innerWidth;
-    const vh = innerHeight;
-    return (
-      r.width > 100 &&
-      r.height > 100 &&
-      r.bottom > vh * 0.1 &&
-      r.top < vh * 0.9 &&
-      r.right > vw * 0.1 &&
-      r.left < vw * 0.9
-    );
+  function canvasToPNGBlob(canvas) {
+    return new Promise(resolve => {
+      canvas.toBlob(b => resolve(b), 'image/png');
+    });
   }
 
-  function imgToPNGBlob(img) {
-    return new Promise(resolve => {
-      const c = document.createElement('canvas');
-      c.width = img.naturalWidth;
-      c.height = img.naturalHeight;
-      c.getContext('2d').drawImage(img, 0, 0);
-      c.toBlob(b => resolve(b), 'image/png');
-    });
+  async function hashBlob(blob) {
+    const buf = await blob.arrayBuffer();
+    const hashBuf = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(hashBuf))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
   }
 
   /********************
@@ -78,7 +71,7 @@
   `;
 
   const header = document.createElement('div');
-  header.textContent = '  DLsite Play 图片下载器';
+  header.textContent = '  DMM 图片下载器';
   header.style.cssText = `
     padding: 10px 12px;
     cursor: move;
@@ -166,35 +159,68 @@
   });
 
   /********************
-   * Capture
+   * Capture Hook
    ********************/
-  async function scan() {
-    if (!capturing) return;
+  const oldDrawImage = CanvasRenderingContext2D.prototype.drawImage;
 
-    const imgs = document.querySelectorAll('img[src^="blob:"]');
+  CanvasRenderingContext2D.prototype.drawImage = function(...args) {
+    try {
+      const src = args[0];
 
-    for (const img of imgs) {
-      if (!isVisible(img)) continue;
-      if (captured.has(img.src)) continue;
-
-      const name = `page_${pad3(pageIndex++)}.png`;
-      const blob = await imgToPNGBlob(img);
-
-      captured.set(img.src, { name, blob });
-      logLine(`✔ 捕获成功：${name}`);
+      if (
+        src instanceof HTMLCanvasElement &&
+        src.width > 1000 &&
+        src.height > 1000
+      ) {
+        canvasToPNGBlob(src).then(blob => {
+          if (!blob) return;
+          if (capturing) {
+            const name = `page_${pad3(pageIndex++)}.png`;
+            captured.push({ name, blob });
+            logLine(`\u2714 捕获成功：${name}  (${src.width}x${src.height})`);
+          } else {
+            preCapture = blob;
+          }
+        }).catch(e => {
+          console.warn('[DMM-ZIP] canvas toBlob 失败:', e);
+        });
+      }
+    } catch(e) {
+      // 静默忽略，确保原始绘制不受影响
     }
-  }
 
-  setInterval(scan, 500);
+    return oldDrawImage.apply(this, args);
+  };
 
   /********************
    * ZIP
    ********************/
   async function downloadZip() {
-    if (!captured.size) {
+    if (!captured.length) {
       alert('没有捕获任何图片');
       return;
     }
+
+    // Hash 去重：保持首次出现顺序
+    logLine('\u25B6 正在去重...');
+    const seen = new Set();
+    const unique = [];
+    let dupCount = 0;
+
+    for (const item of captured) {
+      const hash = await hashBlob(item.blob);
+      if (seen.has(hash)) {
+        dupCount++;
+      } else {
+        seen.add(hash);
+        unique.push(item);
+      }
+    }
+
+    if (dupCount > 0) {
+      logLine(`\u26A0 去除 ${dupCount} 张重复图片`);
+    }
+    logLine(`\u2714 有效图片 ${unique.length} 张`);
 
     if (!window.JSZip) {
       await new Promise(resolve => {
@@ -206,14 +232,14 @@
     }
 
     const zip = new JSZip();
-    for (const { name, blob } of captured.values()) {
+    for (const { name, blob } of unique) {
       zip.file(name, blob);
     }
 
     const zipBlob = await zip.generateAsync({ type: 'blob' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(zipBlob);
-    a.download = 'pages.zip';
+    a.download = 'dmm_pages.zip';
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -225,18 +251,26 @@
     capturing = !capturing;
 
     if (capturing) {
-      captured.clear();
+      captured.length = 0;
       pageIndex = 1;
       log.value = '';
       btn.textContent = '结束捕获';
       btn.style.background = '#dc2626';
-      logLine('▶ 开始捕获...');
+
+      if (preCapture) {
+        const name = `page_${pad3(pageIndex++)}.png`;
+        captured.push({ name, blob: preCapture });
+        logLine(`\u2714 捕获成功：${name}  (\u9884\u6355\u83B7)`);
+        preCapture = null;
+      }
+
+      logLine('\u25B6 开始捕获...');
     } else {
       btn.textContent = '开始捕获';
       btn.style.background = '#2563eb';
-      logLine('■ 结束捕获，正在打包...');
+      logLine('\u25A0 结束捕获，正在打包...');
       await downloadZip();
-      logLine('✔ ZIP 下载完成');
+      logLine('\u2714 ZIP 下载完成');
     }
   };
 
